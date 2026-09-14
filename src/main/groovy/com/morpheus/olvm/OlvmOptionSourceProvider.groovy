@@ -213,13 +213,16 @@ class OlvmOptionSourceProvider extends AbstractOptionSourceProvider {
         args = args instanceof Object[] ? args.getAt(0) : args
         Long cloudId = getCloudId(args)
         Cloud rtn = cloudId ? morpheusContext.async.cloud.getCloudById(cloudId).blockingGet() : null
-        def cloud = rtn
+        def formCloud = args.zone ?: args.domain
         if(!rtn) {
             rtn = new Cloud()
-            cloud = args.zone ?: args.domain
         }
 
-        if(args.credential == null && !cloud.serviceUsername) {
+        def serviceUsername = formCloud?.serviceUsername ?: rtn.serviceUsername
+        def servicePassword = (formCloud?.servicePassword && formCloud.servicePassword != '************') ? formCloud.servicePassword : rtn.servicePassword
+        def serviceUrl = formCloud?.serviceUrl ?: rtn.serviceUrl
+
+        if(args.credential == null && !serviceUsername) {
             // check for passed in credentials
             if(!rtn.accountCredentialLoaded || !rtn.accountCredentialData) {
                 AccountCredential credentials = morpheusContext.services.accountCredential.loadCredentials(rtn)
@@ -227,12 +230,12 @@ class OlvmOptionSourceProvider extends AbstractOptionSourceProvider {
             }
         } else {
             def config = [
-                username: cloud.serviceUsername ?: args.zone.serviceUsername,
-                password: cloud.servicePassword ?: args.zone.servicePassword
+                    username: serviceUsername,
+                    password: servicePassword
             ]
             rtn.setConfigMap(rtn.getConfigMap() + config)
             rtn.accountCredentialData = morpheusContext.services.accountCredential.loadCredentialConfig(args.credential, config).data
-            rtn.serviceUrl = cloud.serviceUrl
+            rtn.serviceUrl = serviceUrl
         }
         rtn.accountCredentialLoaded = true
 

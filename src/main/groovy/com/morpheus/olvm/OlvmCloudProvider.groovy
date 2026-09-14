@@ -394,28 +394,34 @@ class OlvmCloudProvider implements CloudProvider {
 				def config = cloudInfo.getConfigMap()
 				def username, password
 
-				 if(validateCloudRequest.credentialType == 'local') {
-					  username = cloudInfo.serviceUsername
-					  password = cloudInfo.servicePassword
+				cloudInfo.serviceUrl = validateCloudRequest.opts?.zone?.serviceUrl ?: cloudInfo.serviceUrl
 
-					  if(!username) {
-						  return new ServiceResponse(success: false, msg: 'Enter a username', errors: ['serviceUsername': 'Required field'])
-					  }
-					  if(!password) {
-						  return new ServiceResponse(success: false, msg: 'Enter a password', errors: ['servicePassword': 'Required field'])
-					  }
-				 }
+				if(validateCloudRequest.credentialType == 'local') {
+					username = validateCloudRequest.opts?.zone?.serviceUsername ?: cloudInfo.serviceUsername
+					if(validateCloudRequest.opts?.zone?.servicePassword && validateCloudRequest.opts?.zone?.servicePassword != '************') {
+						password = validateCloudRequest.opts?.zone?.servicePassword
+					} else {
+						password = cloudInfo.servicePassword
+					}
+
+					if(!username) {
+						return new ServiceResponse(success: false, msg: 'Enter a username', errors: ['serviceUsername': 'Required field'])
+					}
+					if(!password) {
+						return new ServiceResponse(success: false, msg: 'Enter a password', errors: ['servicePassword': 'Required field'])
+					}
+				}
 				else {
-					 username = validateCloudRequest.credentialUsername
-					 password = validateCloudRequest.credentialPassword
+					username = validateCloudRequest.credentialUsername
+					password = validateCloudRequest.credentialPassword
 
-					 if (!username) {
-						 return new ServiceResponse(success: false, msg: 'Enter a username', errors: ['credential.username': 'Required field'])
-					 }
-					 if (!password) {
-						 return new ServiceResponse(success: false, msg: 'Enter a password', errors: ['credential.password': 'Required field'])
-					 }
-				 }
+					if (!username) {
+						return new ServiceResponse(success: false, msg: 'Enter a username', errors: ['credential.username': 'Required field'])
+					}
+					if (!password) {
+						return new ServiceResponse(success: false, msg: 'Enter a password', errors: ['credential.password': 'Required field'])
+					}
+				}
 
 				//test creds
 				cloudInfo.accountCredentialData = [username: username, password: password]
