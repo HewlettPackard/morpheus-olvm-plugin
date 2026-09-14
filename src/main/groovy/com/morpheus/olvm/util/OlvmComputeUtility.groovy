@@ -335,7 +335,7 @@ class OlvmComputeUtility {
         def rtn = [success:false, errors: []]
         try {
             def cloudId = opts.cloud?.id?.toLong() ?: opts.zoneId?.toLong()
-            def cloud = morpheusContext.async.cloud.getCloudById(opts.zoneId?.toLong()).blockingGet()
+            def cloud = morpheusContext.async.cloud.getCloudById(cloudId).blockingGet()
             def configMap = cloud.configMap
             // Validate enough Elastic IPs left
             if(configMap.datacenter == 'all' && !opts.config?.datacenterId) {
