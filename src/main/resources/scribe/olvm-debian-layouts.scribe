@@ -168,8 +168,8 @@ resource "instance-type-layout" "olvm-debian-11-single" {
 	hasAutoScale = true
 	portCount = 1
 	serverType = "vm"
-	enabled = true
-	creatable = true
+	enabled = false
+	creatable = false
 	supportsConvertToManaged = true
 	containers = [
 		workload-type-set.olvm-debian-11-set
