@@ -251,6 +251,8 @@ class OlvmOptionSourceProvider extends AbstractOptionSourceProvider {
         if (!cloudId && args.domain) {
             if (args.domain instanceof Map)
                 cloudId = args.domain.cloudId ?: args.domain.zoneId ?: args.domain.zone?.id
+            else if (args.domain.hasProperty('zone') && args.domain.zone)
+                cloudId = args.domain.zone.id
             else
                 cloudId = args.domain.id
         }
