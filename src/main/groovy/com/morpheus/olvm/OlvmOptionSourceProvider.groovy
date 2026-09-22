@@ -213,7 +213,7 @@ class OlvmOptionSourceProvider extends AbstractOptionSourceProvider {
         args = args instanceof Object[] ? args.getAt(0) : args
         Long cloudId = getCloudId(args)
         Cloud rtn = cloudId ? morpheusContext.async.cloud.getCloudById(cloudId).blockingGet() : null
-        def formCloud = args.zone ?: args.domain
+        def formCloud = args.zone ?: resolveFormCloud(args.domain)
         if(!rtn) {
             rtn = new Cloud()
         }
@@ -257,5 +257,19 @@ class OlvmOptionSourceProvider extends AbstractOptionSourceProvider {
                 cloudId = args.domain.id
         }
         cloudId ? cloudId.toLong() : null
+    }
+
+    // args.domain may be a Cloud/ComputeZone (has cloud config directly) or a ComputeServer
+    // (has a .zone association pointing at the Cloud). Only return domain itself when it
+    // looks like cloud config; otherwise use its zone, to avoid accessing Cloud-only
+    // properties (e.g. serviceUsername) on a ComputeServer.
+    private static resolveFormCloud(domain) {
+        if (!domain)
+            return null
+        if (domain instanceof Map)
+            return domain
+        if (domain.hasProperty('zone'))
+            return domain.zone
+        return domain
     }
 }
