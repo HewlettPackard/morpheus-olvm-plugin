@@ -100,6 +100,43 @@ class OlvmComputeUtility {
         return rtn
     }
 
+    // Fetches a single cluster's detail (including its data_center reference) by OLVM external id.
+    static getCluster(opts) {
+        def rtn = ServiceResponse.prepare()
+        HttpApiClient client = null
+        try {
+            Map connection = opts.connection
+            if (!connection) {
+                connection = getToken(opts.cloud)
+            }
+            def headers = getAuthenticatedBaseHeaders(connection)
+            client = getApiClient(connection)
+            def reqOptions = new HttpApiClient.RequestOptions(headers:headers, ignoreSSL:(connection?.ignoreSSL != false))
+            def response = client.callJsonApi(
+                connection.apiUrl,
+                "/ovirt-engine/api/clusters/${opts.clusterId}".toString(),
+                reqOptions,
+                'GET'
+            )
+            if (response.success) {
+                rtn.data = response.data
+                rtn.success = true
+            }
+            else {
+                log.error("Unable to get cluster ${opts.clusterId}: ${extractErrorMessage(response.data)}")
+                rtn.error = "Unable to get cluster ${opts.clusterId}: ${extractErrorMessage(response.data)}"
+            }
+        }
+        catch (Throwable t) {
+            log.error("Unable to get cluster ${opts.clusterId}: ${t.message}", t)
+            rtn.error = "Unable to get cluster ${opts.clusterId}: ${t.message}"
+        }
+        finally {
+            client?.shutdownClient()
+        }
+        return rtn
+    }
+
     static listTemplates(opts) {
         ServiceResponse rtn = ServiceResponse.prepare()
         HttpApiClient client = null
