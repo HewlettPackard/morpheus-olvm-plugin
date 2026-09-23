@@ -1803,17 +1803,49 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 
 		// get data center and cluster information
 		def zonePoolService = morpheus.async.cloud.pool
+
+		// config.clusterId/datacenterId come from the wizard-selected options and are present
+		// for a normal workload provision. K8s cluster host nodes (master and workers) are
+		// auto-provisioned without any pool selection at all (opts has no config, and
+		// config.resourcePoolId is blank) - fall back to a sibling node in the same serverGroup
+		// (e.g. the master, which was provisioned normally and already has a resourcePool set).
+		Long clusterPoolId = (config.clusterId ?: config.resourcePoolId ?: opts.config?.clusterId ?: opts.config?.resourcePoolId ?: server.resourcePool?.id) as Long
+		if (!clusterPoolId && server.serverGroup?.id) {
+			def siblingServer = morpheus.async.computeServer.list(
+				new DataQuery().withFilter('serverGroup.id', server.serverGroup.id)
+			).toList().blockingGet().find { it.id != server.id && (it.resourcePool?.id || it.getConfigMap()?.resourcePoolId) }
+			if (siblingServer) {
+				clusterPoolId = (siblingServer.resourcePool?.id ?: siblingServer.getConfigMap()?.resourcePoolId) as Long
+				log.debug("buildRunConfig: resolved clusterPoolId=${clusterPoolId} from sibling server ${siblingServer.id} in serverGroup ${server.serverGroup.id}")
+			}
+		}
+		if (!clusterPoolId) {
+			log.error("buildRunConfig: unable to determine cluster for server ${server.id} - no clusterId/resourcePoolId in config, opts.config, resourcePool, or serverGroup ${server.serverGroup?.id} siblings")
+			throw new IllegalStateException("Unable to determine cluster for server ${server.id}: no clusterId/resourcePoolId in config, opts.config, resourcePool, or serverGroup siblings")
+		}
+		def cluster = zonePoolService.get(clusterPoolId).blockingGet()
+
 		def datacenter
 		if (cloud.configMap.datacenter == 'all') {
-			datacenter = zonePoolService.get(config.datacenterId.toLong()).blockingGet()
+			Long datacenterPoolId = (config.datacenterId ?: opts.config?.datacenterId) as Long
+			if (datacenterPoolId) {
+				datacenter = zonePoolService.get(datacenterPoolId).blockingGet()
+			}
+			else {
+				// derive the datacenter from the resolved cluster's OLVM data_center reference
+				def clusterDetail = OlvmComputeUtility.getCluster([connection:connection, clusterId:cluster.externalId])
+				def datacenterExternalId = clusterDetail.data?.data_center?.id
+				datacenter = zonePoolService.find(
+					new DataQuery().withFilter(new DataFilter('externalId', datacenterExternalId))
+				).blockingGet()
+				log.debug("buildRunConfig: config.datacenterId missing, derived datacenter ${datacenter?.name} from cluster ${cluster.name}")
+			}
 		}
 		else {
 			datacenter = zonePoolService.find(
 				new DataQuery().withFilter(new DataFilter('externalId', cloud.configMap.datacenter))
 			).blockingGet()
 		}
-
-		def cluster = zonePoolService.get(config.clusterId.toLong()).blockingGet()
 
 		def runConfig = [
 			serverId:server.id,
@@ -2448,12 +2480,24 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 
 
 				if (!vmDetails.data.nics) {
-					log.debug("insertVm: VM has no NICs from template, adding primary NIC for network=${runConfig.networkConfig?.primaryInterface?.network?.id}")
-					def addPrimaryInterface = OlvmComputeUtility.addNicsToVm(
-						[connection: runConfig.connection, nics: [runConfig.networkConfig.primaryInterface], vmId: server.externalId]
-					)
-					log.debug("insertVm: addPrimaryInterface success=${addPrimaryInterface.success}")
-					//saveAndGetNic(addPrimaryInterface.data?.first())
+					// hostRequest.networkConfiguration.primaryInterface can be null for auto-provisioned
+					// host nodes (e.g. K8s worker nodes) even though the network was already resolved
+					// into runConfig.networkRef in buildRunConfig - fall back to that instead of NPEing.
+					def primaryInterface = runConfig.networkConfig?.primaryInterface
+					if (!primaryInterface && runConfig.networkRef) {
+						primaryInterface = [name: 'eth0', network: [externalId: runConfig.networkRef]]
+						log.debug("insertVm: networkConfig.primaryInterface missing, falling back to resolved networkRef=${runConfig.networkRef}")
+					}
+					if (primaryInterface) {
+						log.debug("insertVm: VM has no NICs from template, adding primary NIC for network=${primaryInterface.network?.externalId ?: primaryInterface.network?.id}")
+						def addPrimaryInterface = OlvmComputeUtility.addNicsToVm(
+							[connection: runConfig.connection, nics: [primaryInterface], vmId: server.externalId]
+						)
+						log.debug("insertVm: addPrimaryInterface success=${addPrimaryInterface.success}")
+						//saveAndGetNic(addPrimaryInterface.data?.first())
+					} else {
+						log.warn("insertVm: unable to add primary NIC for server ${server.id} - no primaryInterface or resolved networkRef available")
+					}
 				} else {
 					log.debug("insertVm: VM already has ${vmDetails.data.nics.size()} NIC(s) from template")
 				}
