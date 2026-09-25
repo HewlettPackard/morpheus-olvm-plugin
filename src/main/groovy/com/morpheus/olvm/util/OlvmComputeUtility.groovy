@@ -862,7 +862,7 @@ class OlvmComputeUtility {
             }
 
             // send vm create to api
-            def biosType = opts.biosType ?: opts.workloadConfig?.biosType ?: opts.server?.configMap?.biosType ?: 'q35_sea_bios'
+            def biosType = opts.config?.biosType ?: opts.biosType ?: opts.server?.configMap?.biosType
             def postBody = [
                 name:opts.name,
                 cluster:[id:opts.clusterRef],
