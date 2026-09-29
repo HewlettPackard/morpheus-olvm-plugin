@@ -1892,7 +1892,7 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 	 * - OEL/RHEL: writes a NetworkManager keyfile to /etc/NetworkManager/system-connections/ for static IP.
 	 *   DHCP works by default on OEL/RHEL via NetworkManager and needs no extra config.
 	 */
-	protected String enhanceCloudInitConfig(String cloudConfig, def hostname, def domainName, def networkConfig, def serverOs = null, def virtualImage = null) {
+	protected String enhanceCloudInitConfig(String cloudConfig, def hostname, def domainName, def networkConfig, def serverOs = null, def virtualImage = null, Boolean isSnapshotRestore = false) {
 		if (!cloudConfig) {
 			cloudConfig = "#cloud-config\n"
 		}
@@ -1953,6 +1953,35 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 
 		def writeFilesEntries = []
 		def runcmdEntries = []
+		def bootcmdEntries = []
+
+		if (isSnapshotRestore) {
+			// A VM created from a backup snapshot clones the source VM's disk verbatim,
+			// including network-identity state that DHCP clients key leases on: NetworkManager's
+			// per-connection lease cache (keyed by connection UUID, which is also cloned),
+			// systemd-networkd's lease cache, dhclient's lease file, and /etc/machine-id (used to
+			// derive some clients' DUID/IAID). Even when the restored VM gets a brand-new MAC
+			// address from the hypervisor, its DHCP client can still request/receive the source
+			// VM's previously-leased IP because it reuses this cloned identity/lease state rather
+			// than performing a genuine fresh DHCP DISCOVER. This runs unconditionally (both
+			// static and DHCP configurations), via bootcmd (which runs every boot, unlike the
+			// once-per-instance write_files/runcmd), so the guest always starts this boot with a
+			// clean network identity. This is a defense-in-depth complement to the pre-snapshot
+			// cloud-init cache reset done on the source VM in OlvmSnapshotExecutionProvider: that
+			// reset covers cloud-init's own per-instance state (hostname, SSH keys, network config
+			// files), but not the network stack's own persisted DHCP client/lease caches, which
+			// live outside cloud-init's tracked state and were confirmed via live testing to still
+			// cause duplicate DHCP-leased IPs even after the pre-snapshot reset alone.
+			def resetLines = []
+			resetLines << "- |"
+			resetLines << "  rm -f /etc/machine-id /var/lib/dbus/machine-id"
+			resetLines << "  systemd-machine-id-setup >/dev/null 2>&1 || true"
+			resetLines << "  rm -f /var/lib/NetworkManager/*.lease /var/lib/NetworkManager/internal-*.lease"
+			resetLines << "  rm -f /var/lib/dhcp/dhclient*.leases"
+			resetLines << "  rm -f /run/systemd/netif/leases/* 2>/dev/null || true"
+			resetLines << "  nmcli connection reload 2>/dev/null || true"
+			bootcmdEntries << resetLines.join('\n')
+		}
 
 		def primaryInterface = networkConfig?.primaryInterface
 		def nicName = primaryInterface?.name ?: 'eth0'
@@ -2217,12 +2246,21 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			log.info("enhanceCloudInitConfig: OEL DHCP - writing NM keyfile, dhclient conf.d, and systemd-networkd .network file for runtime detection")
 		}
 
-		if (!writeFilesEntries && !runcmdEntries) {
+		if (!writeFilesEntries && !runcmdEntries && !bootcmdEntries) {
 			return cloudConfig
 		}
 
-		// Merge into existing write_files / runcmd sections, or append new sections.
+		// Merge into existing write_files / runcmd / bootcmd sections, or append new sections.
 		// This ensures we don't silently skip config when those sections already exist.
+		if (bootcmdEntries) {
+			def newCmds = "\n" + bootcmdEntries.join('\n')
+			if (cloudConfig =~ /(?m)^bootcmd:\s*$/) {
+				cloudConfig = cloudConfig.replaceFirst(/(?m)^bootcmd:\s*$/, java.util.regex.Matcher.quoteReplacement('bootcmd:' + newCmds))
+			} else {
+				cloudConfig += "\n\nbootcmd:" + newCmds
+			}
+		}
+
 		if (writeFilesEntries) {
 			def newEntries = "\n" + writeFilesEntries.join('\n')
 			if (cloudConfig =~ /(?m)^write_files:\s*$/) {
@@ -2241,7 +2279,7 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			}
 		}
 
-		log.debug("Enhanced cloud-init with ${writeFilesEntries.size()} write_files entries and ${runcmdEntries.size()} runcmd entries")
+		log.debug("Enhanced cloud-init with ${writeFilesEntries.size()} write_files entries, ${runcmdEntries.size()} runcmd entries, and ${bootcmdEntries.size()} bootcmd entries")
 		log.debug("Enhanced cloud-init result length: ${cloudConfig?.length()}")
 		return cloudConfig
 	}
@@ -2540,7 +2578,8 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 					runConfig.domainName,
 					runConfig.networkConfig,
 					runConfig.serverOs,
-					runConfig.virtualImage
+					runConfig.virtualImage,
+					runConfig.restoreSnapshot != null
 				)
 
 				log.debug("insertVm - Starting VM with cloud-init only (no OLVM initialization)")
