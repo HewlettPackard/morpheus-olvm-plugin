@@ -129,7 +129,7 @@ class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
             def vmId = computeServer.externalId
 
             //execute snapshot
-            def result = createSnapshotsForVm(vmId, cloud)
+            def result = createSnapshotsForVm(vmId, cloud, computeServer)
             if(result.success) {
                 def totalSize = result.snapshot.totalSize.toLong()
                 def targetArchive = []
@@ -239,11 +239,64 @@ class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
         return rtn
     }
 
-    protected createSnapshotsForVm(vmId, Cloud cloud){
+    protected createSnapshotsForVm(vmId, Cloud cloud, ComputeServer computeServer = null){
         log.debug("createSnapshotsForVm: ${vmId}")
         def rtn = [success:true]
-        rtn.snapshot = createSnapshot(vmId, cloud)
+        def eligibleForCacheReset = isCloudInitResetEligible(computeServer)
+        if(eligibleForCacheReset) {
+            resetCloudInitCache(computeServer)
+        }
+        try {
+            rtn.snapshot = createSnapshot(vmId, cloud)
+        } finally {
+            if(eligibleForCacheReset) {
+                restoreCloudInitCache(computeServer)
+            }
+        }
         return rtn
+    }
+
+    /**
+     * Determines whether the source VM is a Linux cloud-init image, in which case its cloud-init cache markers
+     * should be reset immediately before snapshotting. This mirrors the convention used by the VMware, KVM, and
+     * SCVMM plugins so a VM restored from this snapshot gets a fresh cloud-init run (network config, hostname,
+     * SSH host keys, etc.) instead of reusing the source VM's cached instance identity.
+     */
+    protected Boolean isCloudInitResetEligible(ComputeServer computeServer) {
+        return computeServer?.sourceImage?.isCloudInit() && computeServer?.serverOs?.platform?.toString() != 'windows'
+    }
+
+    /**
+     * Clears the source VM's cloud-init cache-suppression marker and blanks its machine-id so the upcoming
+     * snapshot captures a "fresh" cloud-init state. The live source VM is left untouched otherwise; its
+     * original machine-id is restored via {@link #restoreCloudInitCache} immediately after the snapshot completes.
+     */
+    protected void resetCloudInitCache(ComputeServer computeServer) {
+        try {
+            log.info("Resetting Machine-Id before snapshotting VM ${computeServer.externalId}")
+            def resetResults = morpheus.executeCommandOnServer(computeServer,
+                'sudo rm -f /etc/cloud/cloud.cfg.d/99-manual-cache.cfg; sudo cp /etc/machine-id /tmp/machine-id-old; sudo rm -f /etc/machine-id; sudo touch /etc/machine-id ; sync ; sync ; sleep 5'
+            ).blockingGet()
+            log.info("Reset Machine-Id results: ${resetResults}")
+            sleep(30000) //ensure the reset flushes to disk before the snapshot is taken
+        } catch(e) {
+            log.error("resetCloudInitCache: ${e}", e)
+        }
+    }
+
+    /**
+     * Restores the source VM's original machine-id and re-enables cloud-init's cache-suppression marker
+     * after the snapshot has been taken, so the live source VM's own cloud-init state is unaffected.
+     */
+    protected void restoreCloudInitCache(ComputeServer computeServer) {
+        try {
+            def restoreResults = morpheus.executeCommandOnServer(computeServer,
+                "sudo bash -c \"echo 'manual_cache_clean: True' >> /etc/cloud/cloud.cfg.d/99-manual-cache.cfg ; cat /tmp/machine-id-old > /etc/machine-id ; rm /tmp/machine-id-old ; sleep 5 ; sync\""
+            ).blockingGet()
+            log.info("Restoring Machine-Id on original VM ${computeServer.externalId}: ${restoreResults}")
+        } catch(e) {
+            log.error("restoreCloudInitCache: ${e}", e)
+        }
     }
 
     protected createSnapshot(vmId, Cloud cloud, Map connection = null) {
