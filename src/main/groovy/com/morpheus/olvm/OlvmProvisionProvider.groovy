@@ -1963,6 +1963,28 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 		// regardless of any stale per-instance cloud-init cache carried over on the disk.
 		def bootcmdEntries = []
 
+		if (isSnapshotRestore) {
+			// A VM created from a backup snapshot clones the source VM's disk verbatim,
+			// including network-identity state that DHCP clients key leases on: NetworkManager's
+			// per-connection lease cache (keyed by connection UUID, which is also cloned),
+			// systemd-networkd's lease cache, dhclient's lease file, and /etc/machine-id (used to
+			// derive some clients' DUID/IAID). Even when the restored VM gets a brand-new MAC
+			// address from the hypervisor, its DHCP client can still request/receive the source
+			// VM's previously-leased IP because it reuses this cloned identity/lease state rather
+			// than performing a genuine fresh DHCP DISCOVER. This runs unconditionally (both
+			// static and DHCP configurations) and before any other network bootcmd below, so the
+			// guest always starts this boot with a clean network identity.
+			def resetLines = []
+			resetLines << "- |"
+			resetLines << "  rm -f /etc/machine-id /var/lib/dbus/machine-id"
+			resetLines << "  systemd-machine-id-setup >/dev/null 2>&1 || true"
+			resetLines << "  rm -f /var/lib/NetworkManager/*.lease /var/lib/NetworkManager/internal-*.lease"
+			resetLines << "  rm -f /var/lib/dhcp/dhclient*.leases"
+			resetLines << "  rm -f /run/systemd/netif/leases/* 2>/dev/null || true"
+			resetLines << "  nmcli connection reload 2>/dev/null || true"
+			bootcmdEntries << resetLines.join('\n')
+		}
+
 		def primaryInterface = networkConfig?.primaryInterface
 		def nicName = primaryInterface?.name ?: 'eth0'
 		def isNetplan = !isOel

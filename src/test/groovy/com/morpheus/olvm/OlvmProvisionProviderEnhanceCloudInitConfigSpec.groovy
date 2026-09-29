@@ -66,4 +66,38 @@ class OlvmProvisionProviderEnhanceCloudInitConfigSpec extends Specification {
 		result.contains('/etc/NetworkManager/system-connections/eth0.nmconnection')
 		result.contains('nmcli connection up id eth0')
 	}
+
+	def dhcpNetworkConfig = [
+		primaryInterface: [
+			name      : 'eth0',
+			doStatic  : false,
+			doDhcp    : true
+		]
+	]
+
+	def "bootcmd section resets machine-id and DHCP lease caches for a restored instance on DHCP"() {
+		// A snapshot-cloned disk carries over network-identity state (NetworkManager connection
+		// UUID/lease cache, systemd-networkd lease cache, dhclient lease file, /etc/machine-id)
+		// that DHCP clients can key leases on. Even with a brand-new MAC, the restored VM can
+		// still request/receive the source VM's previously-leased IP unless this state is reset.
+		when:
+		String result = provider.enhanceCloudInitConfig('#cloud-config\n', 'myhost', 'example.com', dhcpNetworkConfig, [name: 'ubuntu'], [name: 'Ubuntu 22.04'], true)
+		String bootcmdSection = result.substring(result.indexOf('bootcmd:'))
+
+		then:
+		bootcmdSection.contains('rm -f /etc/machine-id')
+		bootcmdSection.contains('systemd-machine-id-setup')
+		bootcmdSection.contains('/var/lib/NetworkManager/*.lease')
+		bootcmdSection.contains('/var/lib/dhcp/dhclient')
+		bootcmdSection.contains('/run/systemd/netif/leases')
+	}
+
+	def "does not reset machine-id/DHCP lease caches when isSnapshotRestore is false"() {
+		when:
+		String result = provider.enhanceCloudInitConfig('#cloud-config\n', 'myhost', 'example.com', dhcpNetworkConfig, [name: 'ubuntu'], [name: 'Ubuntu 22.04'], false)
+
+		then:
+		!result.contains('bootcmd:')
+		!result.contains('systemd-machine-id-setup')
+	}
 }
