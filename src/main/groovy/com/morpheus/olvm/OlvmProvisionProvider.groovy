@@ -1892,7 +1892,7 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 	 * - OEL/RHEL: writes a NetworkManager keyfile to /etc/NetworkManager/system-connections/ for static IP.
 	 *   DHCP works by default on OEL/RHEL via NetworkManager and needs no extra config.
 	 */
-	protected String enhanceCloudInitConfig(String cloudConfig, def hostname, def domainName, def networkConfig, def serverOs = null, def virtualImage = null) {
+	protected String enhanceCloudInitConfig(String cloudConfig, def hostname, def domainName, def networkConfig, def serverOs = null, def virtualImage = null, Boolean isSnapshotRestore = false) {
 		if (!cloudConfig) {
 			cloudConfig = "#cloud-config\n"
 		}
@@ -1953,6 +1953,15 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 
 		def writeFilesEntries = []
 		def runcmdEntries = []
+		// bootcmd runs on every boot (frequency=always), unlike write_files/runcmd which
+		// cloud-init only applies once-per-instance. A VM created from a backup snapshot
+		// (createServerFromSnapshot) clones a disk whose guest already completed a prior
+		// cloud-init run, so cloud-init may treat it as an already-initialized instance and
+		// skip write_files/runcmd entirely, leaving the guest's OS-level network config
+		// (e.g. netplan) pointed at the original/source VM's static IP. For snapshot restores
+		// we additionally force the network config via bootcmd so it always reapplies,
+		// regardless of any stale per-instance cloud-init cache carried over on the disk.
+		def bootcmdEntries = []
 
 		def primaryInterface = networkConfig?.primaryInterface
 		def nicName = primaryInterface?.name ?: 'eth0'
@@ -2014,6 +2023,26 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 				disableCiLines << "  permissions: '0644'"
 				disableCiLines << "  owner: root:root"
 				writeFilesEntries << disableCiLines.join('\n')
+
+				if (isSnapshotRestore) {
+					// Force-write and reapply the same netplan config via bootcmd (always runs,
+					// unlike write_files/runcmd above) in case cloud-init's per-instance cache,
+					// carried over from the source VM's disk, causes it to skip the once-per-instance
+					// modules entirely.
+					def bootcmdLines = []
+					bootcmdLines << "- |"
+					bootcmdLines << "  mkdir -p /etc/netplan /etc/cloud/cloud.cfg.d"
+					bootcmdLines << "  cat > /etc/netplan/99-morpheus.yaml <<'MORPHEUS_NETPLAN_EOF'"
+					netplanLines.each { line -> bootcmdLines << "  ${line}" }
+					bootcmdLines << "  MORPHEUS_NETPLAN_EOF"
+					bootcmdLines << "  chmod 600 /etc/netplan/99-morpheus.yaml"
+					bootcmdLines << "  cat > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg <<'MORPHEUS_CI_EOF'"
+					bootcmdLines << "  network: {config: disabled}"
+					bootcmdLines << "  MORPHEUS_CI_EOF"
+					bootcmdLines << "  rm -f /etc/netplan/50-cloud-init.yaml"
+					bootcmdLines << "  netplan apply || true"
+					bootcmdEntries << bootcmdLines.join('\n')
+				}
 
 				// Remove cloud-init's generated DHCP netplan BEFORE applying ours.
 				// Ubuntu 24.04 cloud images ship with /etc/netplan/50-cloud-init.yaml
@@ -2084,6 +2113,22 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 				fileEntryLines << "  permissions: '0600'"
 				fileEntryLines << "  owner: root:root"
 				writeFilesEntries << fileEntryLines.join('\n')
+
+				if (isSnapshotRestore) {
+					// See netplan branch above: force-write and reapply the same NM keyfile via
+					// bootcmd (always runs) in case cloud-init's per-instance cache, carried over
+					// from the source VM's disk, causes it to skip the once-per-instance modules.
+					def bootcmdLines = []
+					bootcmdLines << "- |"
+					bootcmdLines << "  mkdir -p /etc/NetworkManager/system-connections"
+					bootcmdLines << "  cat > /etc/NetworkManager/system-connections/${nicName}.nmconnection <<'MORPHEUS_NM_EOF'"
+					nmLines.each { line -> bootcmdLines << "  ${line}" }
+					bootcmdLines << "  MORPHEUS_NM_EOF"
+					bootcmdLines << "  chmod 600 /etc/NetworkManager/system-connections/${nicName}.nmconnection"
+					bootcmdLines << "  nmcli connection reload || true"
+					bootcmdLines << "  nmcli connection up id ${nicName} || true"
+					bootcmdEntries << bootcmdLines.join('\n')
+				}
 
 				runcmdEntries << "- nmcli connection reload"
 				runcmdEntries << "- nmcli connection up id ${nicName}"
@@ -2217,7 +2262,7 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			log.info("enhanceCloudInitConfig: OEL DHCP - writing NM keyfile, dhclient conf.d, and systemd-networkd .network file for runtime detection")
 		}
 
-		if (!writeFilesEntries && !runcmdEntries) {
+		if (!writeFilesEntries && !runcmdEntries && !bootcmdEntries) {
 			return cloudConfig
 		}
 
@@ -2241,7 +2286,16 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			}
 		}
 
-		log.debug("Enhanced cloud-init with ${writeFilesEntries.size()} write_files entries and ${runcmdEntries.size()} runcmd entries")
+		if (bootcmdEntries) {
+			def newBootCmds = "\n" + bootcmdEntries.join('\n')
+			if (cloudConfig =~ /(?m)^bootcmd:\s*$/) {
+				cloudConfig = cloudConfig.replaceFirst(/(?m)^bootcmd:\s*$/, java.util.regex.Matcher.quoteReplacement('bootcmd:' + newBootCmds))
+			} else {
+				cloudConfig += "\n\nbootcmd:" + newBootCmds
+			}
+		}
+
+		log.debug("Enhanced cloud-init with ${writeFilesEntries.size()} write_files entries, ${runcmdEntries.size()} runcmd entries, and ${bootcmdEntries.size()} bootcmd entries")
 		log.debug("Enhanced cloud-init result length: ${cloudConfig?.length()}")
 		return cloudConfig
 	}
@@ -2540,7 +2594,8 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 					runConfig.domainName,
 					runConfig.networkConfig,
 					runConfig.serverOs,
-					runConfig.virtualImage
+					runConfig.virtualImage,
+					runConfig.restoreSnapshot != null
 				)
 
 				log.debug("insertVm - Starting VM with cloud-init only (no OLVM initialization)")
