@@ -1658,6 +1658,17 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			hostAffinity      : hostAffinity,
 		]
 
+		// derive bios_type from the virtual image's advanced flags
+		def runConfigConfig = new LinkedHashMap(opts.config ?: [:])
+		if (!runConfigConfig.biosType) {
+			if (virtualImage?.secureBoot) {
+				runConfigConfig.biosType = 'q35_secure_boot'
+			} else if (virtualImage?.uefi) {
+				runConfigConfig.biosType = 'q35_ovmf'
+			}
+		}
+		runConfig.config = runConfigConfig
+
 		log.debug("buildWorkloadRunConfig - Cloud-init config length: ${runConfig.cloudConfig?.length()}")
 
 		return runConfig
