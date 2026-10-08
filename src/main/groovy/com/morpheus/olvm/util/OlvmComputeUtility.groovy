@@ -1224,7 +1224,13 @@ class OlvmComputeUtility {
                         }
                     }
                 } else if (!resp.success) {
-                    log.debug("checkServerReady: getServerDetail failed on attempt ${attempts + 1}: ${extractErrorMessage(resp.data) ?: resp.msg}")
+                    log.debug("checkServerReady: getServerDetail failed on attempt ${attempts + 1}: ${resp.msg}")
+                    if (resp.errorCode == '404') {
+                        log.warn("checkServerReady: VM no longer exists in OLVM, giving up: ${resp.msg}")
+                        rtn.msg = resp.msg
+                        rtn.errorCode = resp.errorCode
+                        break
+                    }
                 }
                 attempts++
                 if(pending && attempts >= 15) {
@@ -1258,11 +1264,13 @@ class OlvmComputeUtility {
                     'GET'
                 )
 
-                if (response.success) {
-                    rtn.data = [
-                        connection: connection,
-                    ]
-                    rtn.success = true
+                if (!response.success) {
+                    // e.g. 404 when the VM no longer exists; the error body has no VM fields to parse
+                    rtn.success = false
+                    rtn.errorCode = response.errorCode
+                    rtn.msg = extractErrorMessage(response.data) ?: response.msg
+                    log.warn("getServerDetail: unable to load VM ${externalId} (errorCode=${response.errorCode}): ${rtn.msg}")
+                    return rtn
                 }
                 def vm = response.data
                 def vmMap = [
@@ -1927,7 +1935,11 @@ class OlvmComputeUtility {
             // first wait for the vm to unlock
             waitForSomeStuffToHappen([label: "Create vm ${opts.server.name}"]) {
                 // we need to wait till our vm status is equal to DOWN so we know it has finished creating
-                def vm = client.callJsonApi(connection.apiUrl, "/ovirt-engine/api/vms/${opts.server.externalId}".toString(), reqOptions, 'GET').data
+                def vmResponse = client.callJsonApi(connection.apiUrl, "/ovirt-engine/api/vms/${opts.server.externalId}".toString(), reqOptions, 'GET')
+                if (!vmResponse.success && vmResponse.errorCode == '404') {
+                    throw new RuntimeException("VM ${opts.server.name}(${opts.server.externalId}) was not found in OLVM: ${extractErrorMessage(vmResponse.data) ?: vmResponse.msg}")
+                }
+                def vm = vmResponse.data
                 log.debug("VM ${opts.server.name}(${opts.server.externalId}) status is ${vm.status}")
                 return vm.status == 'down'
             }
