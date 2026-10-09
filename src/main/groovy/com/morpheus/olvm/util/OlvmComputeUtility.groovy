@@ -1224,7 +1224,15 @@ class OlvmComputeUtility {
                         }
                     }
                 } else if (!resp.success) {
-                    log.debug("checkServerReady: getServerDetail failed on attempt ${attempts + 1}: ${extractErrorMessage(resp.data) ?: resp.msg}")
+                    if (resp.errorCode == '404') {
+                        // Fast-fail: the VM has disappeared on the oVirt side (removed out of band, or
+                        // a failed create). It will never reach 'up', so stop polling immediately
+                        // instead of burning all 15 attempts (150s) waiting for a status that can't arrive.
+                        log.warn("checkServerReady: VM not found (404) on attempt ${attempts + 1} - failing fast: ${extractErrorMessage(resp.data) ?: resp.msg}")
+                        pending = false
+                    } else {
+                        log.debug("checkServerReady: getServerDetail failed on attempt ${attempts + 1}: ${extractErrorMessage(resp.data) ?: resp.msg}")
+                    }
                 }
                 attempts++
                 if(pending && attempts >= 15) {
@@ -1258,11 +1266,17 @@ class OlvmComputeUtility {
                     'GET'
                 )
 
-                if (response.success) {
-                    rtn.data = [
-                        connection: connection,
-                    ]
-                    rtn.success = true
+                if (!response.success) {
+                    // Fast-fail: oVirt returned an error (e.g. 404 Not Found when the VM has been
+                    // removed out of band, or a failed create). The error body has no 'cpu'/'topology'
+                    // fields, so parsing it as a VM would NPE on vm.cpu.topology.cores. Return a clean
+                    // failure immediately instead, so pollers like checkServerReady and
+                    // waitForServerExists can detect the missing VM right away instead of looping
+                    // until their timeout.
+                    rtn.success = false
+                    rtn.errorCode = response.errorCode
+                    rtn.msg = extractErrorMessage(response.data) ?: response.msg ?: "VM ${externalId} not found".toString()
+                    return rtn
                 }
                 def vm = response.data
                 def vmMap = [
@@ -1927,7 +1941,14 @@ class OlvmComputeUtility {
             // first wait for the vm to unlock
             waitForSomeStuffToHappen([label: "Create vm ${opts.server.name}"]) {
                 // we need to wait till our vm status is equal to DOWN so we know it has finished creating
-                def vm = client.callJsonApi(connection.apiUrl, "/ovirt-engine/api/vms/${opts.server.externalId}".toString(), reqOptions, 'GET').data
+                def vmResponse = client.callJsonApi(connection.apiUrl, "/ovirt-engine/api/vms/${opts.server.externalId}".toString(), reqOptions, 'GET')
+                if (!vmResponse.success) {
+                    // Fast-fail: the VM does not exist on the oVirt side (e.g. the create silently
+                    // failed). There is no 'status' to wait on, so stop polling immediately instead of
+                    // looping until DEFAULT_WAIT_TIMEOUT (30 minutes).
+                    throw new RuntimeException("VM ${opts.server.name}(${opts.server.externalId}) not found while waiting for it to exist: ${extractErrorMessage(vmResponse.data) ?: vmResponse.msg}")
+                }
+                def vm = vmResponse.data
                 log.debug("VM ${opts.server.name}(${opts.server.externalId}) status is ${vm.status}")
                 return vm.status == 'down'
             }
