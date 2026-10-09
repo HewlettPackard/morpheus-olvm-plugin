@@ -11,7 +11,9 @@ import com.morpheusdata.core.data.DataQuery
 import com.morpheusdata.core.data.DataQueryResult
 import com.morpheusdata.model.AccountCredential
 import com.morpheusdata.model.Cloud
+import com.morpheusdata.model.CloudPool
 import com.morpheusdata.model.ImageType
+import com.morpheusdata.model.ResourcePermission
 import com.morpheusdata.model.VirtualImage
 import com.morpheusdata.model.VirtualImageType
 import groovy.util.logging.Slf4j
@@ -197,7 +199,7 @@ class OlvmOptionSourceProvider extends AbstractOptionSourceProvider {
             )
         ).blockingGet()
         def i = 0
-        for (cloudPool in pools.items) {
+        for (cloudPool in filterVisiblePools(pools.items, cloud, args?.accountId?.toLong())) {
             def setAsDefault = false
             if (firstOptionDefault && i == 0)
                 setAsDefault = true
@@ -207,6 +209,19 @@ class OlvmOptionSourceProvider extends AbstractOptionSourceProvider {
             i++
         }
         return rtn
+    }
+
+    // Mirrors core pool visibility: a pool is hidden from an account unless it is public, owned by the
+    // account, or the account holds a ComputeZonePool resource permission. The cloud owner sees everything.
+    protected List<CloudPool> filterVisiblePools(Collection<CloudPool> pools, Cloud cloud, Long accountId) {
+        if (!accountId || cloud?.account?.id == accountId)
+            return pools as List<CloudPool>
+        Set<Long> accessibleIds = morpheusContext.async.resourcePermission.listAccessibleResources(
+            accountId, ResourcePermission.ResourceType.ComputeZonePool, null, null
+        ).toList().blockingGet() as Set<Long>
+        return pools.findAll { CloudPool p ->
+            p.visibility == 'public' || p.owner?.id == accountId || accessibleIds.contains(p.id)
+        }
     }
 
     protected Cloud loadCloud(args) {
