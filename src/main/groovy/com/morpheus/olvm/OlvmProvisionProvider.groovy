@@ -1599,6 +1599,7 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			networkConfig	  : hostRequest.networkConfiguration,
 			workloadConfig    : serverConfig
 		]
+		runConfig.config = applyBiosType(opts.config, virtualImage)
 
 		log.debug("buildHostRunConfig - Cloud-init config length: ${runConfig.cloudConfig?.length()}")
 
@@ -1658,16 +1659,7 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			hostAffinity      : hostAffinity,
 		]
 
-		// derive bios_type from the virtual image's advanced flags
-		def runConfigConfig = new LinkedHashMap(opts.config ?: [:])
-		if (!runConfigConfig.biosType) {
-			if (virtualImage?.secureBoot) {
-				runConfigConfig.biosType = 'q35_secure_boot'
-			} else if (virtualImage?.uefi) {
-				runConfigConfig.biosType = 'q35_ovmf'
-			}
-		}
-		runConfig.config = runConfigConfig
+		runConfig.config = applyBiosType(opts.config, virtualImage)
 
 		log.debug("buildWorkloadRunConfig - Cloud-init config length: ${runConfig.cloudConfig?.length()}")
 
@@ -1795,6 +1787,33 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 	}
 
 
+
+	protected Map applyBiosType(Map config, VirtualImage virtualImage) {
+		def rtn = new LinkedHashMap(config ?: [:])
+		if (!rtn.biosType) {
+			rtn.biosType = resolveBiosType(virtualImage)
+		}
+		return rtn
+	}
+
+	protected String resolveBiosType(VirtualImage virtualImage) {
+		if (virtualImage?.secureBoot) {
+			return 'q35_secure_boot'
+		}
+		if (virtualImage?.uefi) {
+			return 'q35_ovmf'
+		}
+		// Synced OLVM templates carry their own firmware, so let OLVM inherit it from the template.
+		if (isSyncedOlvmTemplate(virtualImage)) {
+			return null
+		}
+		// Uploaded images get a template with the cluster default firmware, which may be UEFI.
+		return 'q35_sea_bios'
+	}
+
+	protected Boolean isSyncedOlvmTemplate(VirtualImage virtualImage) {
+		return virtualImage?.code?.startsWith('olvm.plugin.template.') ?: false
+	}
 
 	protected buildRunConfig(ComputeServer server, VirtualImage virtualImage, NetworkConfiguration networkConfiguration, Map connection, config, Map opts) {
 		log.debug("buildRunConfig: {}, {}, {}, {}, {}", server, virtualImage, networkConfiguration, config, opts)

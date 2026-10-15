@@ -18,8 +18,12 @@ import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
 import io.reactivex.rxjava3.schedulers.Schedulers
 
+import java.util.concurrent.TimeUnit
+
 @Slf4j
 class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
+    long agentCommandTimeoutSeconds = 60
+
     OlvmCloudPlugin plugin
     MorpheusContext morpheus
 
@@ -70,7 +74,7 @@ class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
         def rtn = ServiceResponse.success()
         try {
             def cloudId = backupResult.zoneId ?: backupResult.backup.zoneId
-            def snapshotIds = backupResult?.configMap?.snapshots?.collect{ it.snapshotId }.unique()
+            def snapshotIds = backupResult?.configMap?.snapshots?.collect{ it.snapshotId }?.unique()
 
             def cloud
             def backupConfig = backupResult.configMap
@@ -243,13 +247,11 @@ class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
         log.debug("createSnapshotsForVm: ${vmId}")
         def rtn = [success:true]
         def eligibleForCacheReset = isCloudInitResetEligible(computeServer)
-        if(eligibleForCacheReset) {
-            resetCloudInitCache(computeServer)
-        }
+        def cacheReset = eligibleForCacheReset ? resetCloudInitCache(computeServer) : false
         try {
             rtn.snapshot = createSnapshot(vmId, cloud)
         } finally {
-            if(eligibleForCacheReset) {
+            if(cacheReset) {
                 restoreCloudInitCache(computeServer)
             }
         }
@@ -270,17 +272,24 @@ class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
      * Clears the source VM's cloud-init cache-suppression marker and blanks its machine-id so the upcoming
      * snapshot captures a "fresh" cloud-init state. The live source VM is left untouched otherwise; its
      * original machine-id is restored via {@link #restoreCloudInitCache} immediately after the snapshot completes.
+     * Returns true only when the reset succeeded; on failure or timeout the snapshot proceeds without the reset.
      */
-    protected void resetCloudInitCache(ComputeServer computeServer) {
+    protected Boolean resetCloudInitCache(ComputeServer computeServer) {
         try {
             log.info("Resetting Machine-Id before snapshotting VM ${computeServer.externalId}")
             def resetResults = morpheus.executeCommandOnServer(computeServer,
                 'sudo rm -f /etc/cloud/cloud.cfg.d/99-manual-cache.cfg; sudo cp /etc/machine-id /tmp/machine-id-old; sudo rm -f /etc/machine-id; sudo touch /etc/machine-id ; sync ; sync ; sleep 5'
-            ).blockingGet()
+            ).timeout(agentCommandTimeoutSeconds, TimeUnit.SECONDS).blockingGet()
             log.info("Reset Machine-Id results: ${resetResults}")
+            if(resetResults?.success != true) {
+                log.warn("Machine-Id reset failed on VM ${computeServer.externalId}, snapshotting without it: ${resetResults?.error}")
+                return false
+            }
             sleep(30000) //ensure the reset flushes to disk before the snapshot is taken
+            return true
         } catch(e) {
-            log.error("resetCloudInitCache: ${e}", e)
+            log.warn("Machine-Id reset did not complete on VM ${computeServer.externalId} within ${agentCommandTimeoutSeconds}s, snapshotting without it: ${e}")
+            return false
         }
     }
 
@@ -291,8 +300,8 @@ class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
     protected void restoreCloudInitCache(ComputeServer computeServer) {
         try {
             def restoreResults = morpheus.executeCommandOnServer(computeServer,
-                "sudo bash -c \"echo 'manual_cache_clean: True' >> /etc/cloud/cloud.cfg.d/99-manual-cache.cfg ; cat /tmp/machine-id-old > /etc/machine-id ; rm /tmp/machine-id-old ; sleep 5 ; sync\""
-            ).blockingGet()
+                "sudo bash -c \"echo 'manual_cache_clean: True' >> /etc/cloud/cloud.cfg.d/99-manual-cache.cfg ; if [ -s /tmp/machine-id-old ]; then cat /tmp/machine-id-old > /etc/machine-id ; fi ; rm -f /tmp/machine-id-old ; sleep 5 ; sync\""
+            ).timeout(agentCommandTimeoutSeconds, TimeUnit.SECONDS).blockingGet()
             log.info("Restoring Machine-Id on original VM ${computeServer.externalId}: ${restoreResults}")
         } catch(e) {
             log.error("restoreCloudInitCache: ${e}", e)
