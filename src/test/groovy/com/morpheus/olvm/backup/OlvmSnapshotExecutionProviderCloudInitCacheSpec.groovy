@@ -56,7 +56,7 @@ class OlvmSnapshotExecutionProviderCloudInitCacheSpec extends Specification {
 	def "resetCloudInitCache executes the cache/machine-id reset command on the server"() {
 		given:
 		def server = buildServer(true, 'linux')
-		def result = Mock(TaskResult)
+		def result = new TaskResult(success: true)
 		1 * morpheusContext.executeCommandOnServer(server, { String cmd ->
 			cmd.contains('rm -f /etc/cloud/cloud.cfg.d/99-manual-cache.cfg') &&
 				cmd.contains('cp /etc/machine-id /tmp/machine-id-old') &&
@@ -66,10 +66,10 @@ class OlvmSnapshotExecutionProviderCloudInitCacheSpec extends Specification {
 		provider.metaClass.sleep = { Long millis -> } // skip the real 30s flush delay in tests
 
 		when:
-		provider.resetCloudInitCache(server)
+		def reset = provider.resetCloudInitCache(server)
 
 		then:
-		noExceptionThrown()
+		reset == true
 	}
 
 	def "restoreCloudInitCache executes the cache/machine-id restore command on the server"() {
@@ -78,8 +78,8 @@ class OlvmSnapshotExecutionProviderCloudInitCacheSpec extends Specification {
 		def result = Mock(TaskResult)
 		1 * morpheusContext.executeCommandOnServer(server, { String cmd ->
 			cmd.contains("echo 'manual_cache_clean: True' >> /etc/cloud/cloud.cfg.d/99-manual-cache.cfg") &&
-				cmd.contains('cat /tmp/machine-id-old > /etc/machine-id') &&
-				cmd.contains('rm /tmp/machine-id-old')
+				cmd.contains('if [ -s /tmp/machine-id-old ]; then cat /tmp/machine-id-old > /etc/machine-id ; fi') &&
+				cmd.contains('rm -f /tmp/machine-id-old')
 		}) >> Single.just(result)
 
 		when:
@@ -95,16 +95,72 @@ class OlvmSnapshotExecutionProviderCloudInitCacheSpec extends Specification {
 		morpheusContext.executeCommandOnServer(server, _ as String) >> { throw new RuntimeException('ssh failed') }
 
 		when:
-		provider.resetCloudInitCache(server)
+		def reset = provider.resetCloudInitCache(server)
+
+		then:
+		noExceptionThrown()
+		reset == false
+	}
+
+	def "resetCloudInitCache returns false without waiting when the command reports failure"() {
+		given:
+		def server = buildServer(true, 'linux')
+		morpheusContext.executeCommandOnServer(server, _ as String) >> Single.just(new TaskResult(success: false, error: 'agent error'))
+		def slept = false
+		provider.metaClass.sleep = { Long millis -> slept = true }
+
+		when:
+		def reset = provider.resetCloudInitCache(server)
+
+		then:
+		reset == false
+		!slept
+	}
+
+	def "resetCloudInitCache returns false when the agent never answers"() {
+		given:
+		def server = buildServer(true, 'linux')
+		provider.agentCommandTimeoutSeconds = 1
+		morpheusContext.executeCommandOnServer(server, _ as String) >> Single.never()
+
+		when:
+		def reset = provider.resetCloudInitCache(server)
+
+		then:
+		reset == false
+	}
+
+	def "restoreCloudInitCache does not block when the agent never answers"() {
+		given:
+		def server = buildServer(true, 'linux')
+		provider.agentCommandTimeoutSeconds = 1
+		morpheusContext.executeCommandOnServer(server, _ as String) >> Single.never()
+
+		when:
+		provider.restoreCloudInitCache(server)
 
 		then:
 		noExceptionThrown()
 	}
 
+	def "createSnapshotsForVm snapshots without restoring when the reset times out"() {
+		given:
+		def server = buildServer(true, 'linux')
+		provider.agentCommandTimeoutSeconds = 1
+		provider.metaClass.createSnapshot = { vmId, c -> [id: 'snap-1'] }
+
+		when:
+		def rtn = provider.createSnapshotsForVm('vm-1', null, server)
+
+		then:
+		1 * morpheusContext.executeCommandOnServer(server, _ as String) >> Single.never()
+		rtn.snapshot == [id: 'snap-1']
+	}
+
 	def "createSnapshotsForVm resets then restores the cloud-init cache around the snapshot call"() {
 		given:
 		def server = buildServer(true, 'linux')
-		def result = Mock(TaskResult)
+		def result = new TaskResult(success: true)
 		def cloud = null
 		provider.metaClass.sleep = { Long millis -> }
 		provider.metaClass.createSnapshot = { vmId, c -> [id: 'snap-1'] }
