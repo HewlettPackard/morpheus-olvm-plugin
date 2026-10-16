@@ -1743,13 +1743,31 @@ class OlvmComputeUtility {
             client = getApiClient(connection)
             def headers = getAuthenticatedBaseHeaders(connection)
             def reqOptions = new HttpApiClient.RequestOptions(headers:headers, ignoreSSL:(connection?.ignoreSSL != false))
-            def response = client.callJsonApi(
-                connection.apiUrl,
-                "/ovirt-engine/api/vms/${vmId}".toString(),
-                reqOptions,
-                'DELETE'
-            )
-            rtn.success = response.success
+            // oVirt rejects the delete with 409 while a snapshot operation (e.g. a backup delete) is still running, so retry until it is accepted
+            def lastError
+            def failedFast = false
+            def waitResult = waitForSomeStuffToHappen([label: "Delete vm ${vmId}", timeout: (opts.deleteTimeout ?: (10l * 60l))]) {
+                def response = client.callJsonApi(
+                    connection.apiUrl,
+                    "/ovirt-engine/api/vms/${vmId}".toString(),
+                    reqOptions,
+                    'DELETE'
+                )
+                if (response.success || response.errorCode == '404') {
+                    return true
+                }
+                lastError = extractErrorMessage(response.data) ?: response.msg
+                if (response.errorCode != '409') {
+                    failedFast = true
+                    return true
+                }
+                log.info("deleteServer: vm ${vmId} busy, retrying delete: ${lastError}")
+                return false
+            }
+            rtn.success = waitResult.success && !failedFast
+            if (!rtn.success) {
+                rtn.msg = lastError ?: waitResult.error
+            }
         }
         finally {
             client?.shutdownClient()

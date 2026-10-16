@@ -69,4 +69,24 @@ class OlvmProvisionProviderEnhanceCloudInitConfigSpec extends Specification {
 		result.contains('echo existing')
 		result.contains('systemd-machine-id-setup')
 	}
+
+	def "bootcmd stops the cloned morpheus agent and removes its config once per instance for a restored instance"() {
+		when:
+		String result = provider.enhanceCloudInitConfig('#cloud-config\n', 'myhost', 'example.com', dhcpNetworkConfig, [name: 'ubuntu'], [name: 'Ubuntu 22.04'], true)
+		String bootcmdSection = result.substring(result.indexOf('bootcmd:'))
+
+		then:
+		bootcmdSection.contains('cloud-init-per instance morpheus-agent-reset')
+		bootcmdSection.contains('morpheus-node-ctl stop')
+		bootcmdSection.contains('systemctl stop morpheus-morphd')
+		bootcmdSection.contains('rm -f /opt/morpheus-node/conf/config.yml /etc/morpheus/morpheus-node.yaml /etc/morpheus/morpheus-node.rb /etc/morpheus/morpheus-node.conf')
+	}
+
+	def "does not touch the morpheus agent when isSnapshotRestore is false"() {
+		when:
+		String result = provider.enhanceCloudInitConfig('#cloud-config\n', 'myhost', 'example.com', dhcpNetworkConfig, [name: 'ubuntu'], [name: 'Ubuntu 22.04'], false)
+
+		then:
+		!result.contains('morpheus-agent-reset')
+	}
 }

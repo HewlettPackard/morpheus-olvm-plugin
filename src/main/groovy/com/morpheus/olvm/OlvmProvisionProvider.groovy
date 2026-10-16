@@ -1513,7 +1513,7 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			if (deleteResult.success) {
 				return ServiceResponse.success()
 			} else {
-				return ServiceResponse.error('Failed to remove vm')
+				return ServiceResponse.error(deleteResult.msg ?: 'Failed to remove vm', null)
 			}
 		} else {
 			log.info("deleteServer - ignoring request for unmanaged instance")
@@ -2011,6 +2011,11 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			resetLines << "  rm -f /run/systemd/netif/leases/* 2>/dev/null || true"
 			resetLines << "  nmcli connection reload 2>/dev/null || true"
 			bootcmdEntries << resetLines.join('\n')
+			// the cloned disk carries the source VM's agent config and api key; stop it once per instance so it cannot connect as the source before runcmd reinstalls it
+			def agentResetLines = []
+			agentResetLines << "- |"
+			agentResetLines << "  cloud-init-per instance morpheus-agent-reset sh -c 'morpheus-node-ctl stop >/dev/null 2>&1; systemctl stop morpheus-morphd morpheus-node morpheus-node-runsvdir >/dev/null 2>&1; rm -f /opt/morpheus-node/conf/config.yml /etc/morpheus/morpheus-node.yaml /etc/morpheus/morpheus-node.rb /etc/morpheus/morpheus-node.conf; true'"
+			bootcmdEntries << agentResetLines.join('\n')
 		}
 
 		def primaryInterface = networkConfig?.primaryInterface
