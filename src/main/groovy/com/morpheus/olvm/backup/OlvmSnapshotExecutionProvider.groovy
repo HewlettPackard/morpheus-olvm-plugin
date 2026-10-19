@@ -91,6 +91,7 @@ class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
                     def result = deleteSnapshot(backupConfig.vmId, snapshotId, cloud)
                     if(!result.success) {
                         rtn.success = false
+                        rtn.msg = result.msg
                     }
                 }
             }
@@ -365,21 +366,38 @@ class OlvmSnapshotExecutionProvider implements BackupExecutionProvider {
             def headers = OlvmComputeUtility.getAuthenticatedBaseHeaders(connection)
             def reqOptions = new HttpApiClient.RequestOptions(headers:headers, ignoreSSL:true)
             client = OlvmComputeUtility.getApiClient(connection)
-            def response = client.callJsonApi(
-                connection.apiUrl,
-                "/ovirt-engine/api/vms/${vmId}/snapshots/${snapshotId}".toString(),
-                reqOptions,
-                'DELETE'
-            )
 
-            if (!response.success && response.errorCode != '404') {
-                throw new RuntimeException("Failed to delete snapshot ${snapshotId}: ${OlvmComputeUtility.extractErrorMessage(response.data)}")
+            // oVirt rejects the delete with 409 while a prior snapshot operation on the same vm is still running, so retry until it is accepted
+            def lastError
+            def failedFast = false
+            def waitResult = OlvmComputeUtility.waitForSomeStuffToHappen([label: "Delete snapshot ${snapshotId}", timeout: (5l * 60l)]) {
+                def response = client.callJsonApi(
+                    connection.apiUrl,
+                    "/ovirt-engine/api/vms/${vmId}/snapshots/${snapshotId}".toString(),
+                    reqOptions,
+                    'DELETE'
+                )
+                if (response.success || response.errorCode == '404') {
+                    return true
+                }
+                lastError = OlvmComputeUtility.extractErrorMessage(response.data)
+                if (response.errorCode != '409') {
+                    failedFast = true
+                    return true
+                }
+                log.info("deleteSnapshot: snapshot ${snapshotId} busy, retrying delete: ${lastError}")
+                return false
+            }
+
+            if (!waitResult.success || failedFast) {
+                throw new RuntimeException("Failed to delete snapshot ${snapshotId}: ${lastError ?: waitResult.error}")
             }
 
             log.debug("deleted snapshot ${snapshotId}")
         }
         catch (Throwable t) {
             rtn.success = false
+            rtn.msg = t.message
             log.error("Failed to delete snapshot ${snapshotId}: ${t.message}", t)
         }
         finally {
