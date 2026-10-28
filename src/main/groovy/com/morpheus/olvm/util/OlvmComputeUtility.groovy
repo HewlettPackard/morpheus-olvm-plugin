@@ -7,11 +7,7 @@ import com.morpheusdata.core.util.image.Qcow2InputStream
 import com.morpheusdata.model.Cloud
 import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
-import java.security.cert.X509Certificate
+import org.apache.http.client.methods.CloseableHttpResponse
 
 @Slf4j
 class OlvmComputeUtility {
@@ -698,80 +694,43 @@ class OlvmComputeUtility {
     }
 
     static pushDataToTarget(Qcow2InputStream inputStream, URL url, Map con, Long contentLength = null) {
-        HttpURLConnection connection
+        if (url.protocol != 'https') {
+            // Fail fast rather than sending the Authorization token and image bytes
+            // over plaintext HTTP.
+            throw new IllegalStateException("pushDataToTarget target URL is not HTTPS (${url}); refusing to upload credentials/data over plain HTTP")
+        }
+
+        HttpApiClient client = getApiClient(con)
+        CloseableHttpResponse response = null
         try {
-            // Install the all-trusting trust manager
-            TrustManager[] trustAllCertificates = new TrustManager[]{
-                new X509TrustManager() {
-                    public X509Certificate[] getAcceptedIssuers() {
-                        return null
-                    }
+            // Qcow2InputStream caches the header bytes it read while parsing the qcow
+            // metadata; prepend them back so the uploaded stream is byte-for-byte
+            // identical to the source file.
+            InputStream body = new SequenceInputStream(new ByteArrayInputStream(inputStream.qcowHeader.bytes), inputStream)
 
-                    public void checkClientTrusted(X509Certificate[] certs, String authType) {
-                    }
+            def headers = [
+                'Content-Type' : 'application/octet-stream',
+                'Authorization': "******".toString()
+            ]
+            // ignoreSSL scopes an all-trusting SSLConnectionSocketFactory to THIS
+            // HttpApiClient instance only -- it never touches the JVM-wide SSL defaults.
+            HttpApiClient.RequestOptions reqOptions = new HttpApiClient.RequestOptions(
+                headers: headers,
+                ignoreSSL: (con?.ignoreSSL != false),
+                contentLength: contentLength
+            )
 
-                    public void checkServerTrusted(X509Certificate[] certs, String authType) {
-                    }
-                }
+            def result = client.callStreamApi(url.toString(), '', null, null, body, reqOptions, 'PUT')
+            response = result.data instanceof CloseableHttpResponse ? (CloseableHttpResponse) result.data : null
+            if (!result.success) {
+                throw new RuntimeException("Failed to push data to target ${url}: ${result.error ?: result.msg}")
             }
-
-            // Create a SSL context with the all-trusting manager
-            SSLContext sslContext = SSLContext.getInstance("TLS")
-            sslContext.init(null, trustAllCertificates, new java.security.SecureRandom())
-
-            // Open a connection to the URL
-            connection = (HttpURLConnection) url.openConnection()
-
-            // Scope the all-trusting SSL context to THIS connection only — never mutate
-            // the JVM-wide default, since Morpheus runs plugins in a shared process and
-            // a global override would silently disable TLS verification for every other
-            // HTTPS connection in that process.
-            if (connection instanceof HttpsURLConnection) {
-                ((HttpsURLConnection) connection).setSSLSocketFactory(sslContext.getSocketFactory())
-            }
-            else {
-                // Fail fast rather than sending the Authorization token and image bytes
-                // over plaintext HTTP.
-                throw new IllegalStateException("pushDataToTarget target URL is not HTTPS (${url}); refusing to upload credentials/data over plain HTTP")
-            }
-
-            // Set connection properties
-            connection.setRequestMethod("PUT")
-            connection.setDoOutput(true); // Indicates that this connection will send data
-            connection.setRequestProperty("Content-Type", "application/octet-stream")
-            connection.setRequestProperty("Authorization", "Bearer ${con.token}".toString())
-
-            if (contentLength) {
-                connection.setFixedLengthStreamingMode(contentLength)
-            }
-            else {
-                connection.setChunkedStreamingMode(2 * 1024 * 1024) // default to 2 MB chunks
-            }
-
-            // Get the OutputStream from the connection
-            OutputStream outputStream = connection.getOutputStream()
-
-            // Define a buffer for reading from the InputStream
-            byte[] buffer = new byte[2048]
-            int bytesRead
-
-            // first write all the bytes cached by the Qcow2InputStream that were read to generate the qcow header
-            outputStream.write(inputStream.qcowHeader.bytes)
-
-            // Read from the InputStream and write to the OutputStream
-            while ((bytesRead = inputStream.read(buffer)) != -1) {
-                outputStream.write(buffer, 0, bytesRead)
-            }
-
-            inputStream.close()
-            outputStream.close()
-
-            // Get the response code
-            int responseCode = connection.getResponseCode()
-            log.info("Response Code: ${responseCode}")
+            log.info("Response Code: ${response?.statusLine?.statusCode}")
         }
         finally {
-            connection?.disconnect()
+            inputStream?.close()
+            response?.close()
+            client?.shutdownClient()
         }
     }
 
