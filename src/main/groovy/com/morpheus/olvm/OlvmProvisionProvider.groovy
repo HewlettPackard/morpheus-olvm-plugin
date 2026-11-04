@@ -600,6 +600,11 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 		return true
 	}
 
+	// Not @Override: the hook exists only in newer plugin API versions; guest-reported memory differs from the provisioned size.
+	Boolean canSyncMaxMemoryStats() {
+		return false
+	}
+
 	@Override
 	Boolean multiTenant() {
 		return false
