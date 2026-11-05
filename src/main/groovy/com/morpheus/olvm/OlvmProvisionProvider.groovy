@@ -600,6 +600,12 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 		return true
 	}
 
+	// Guest-reported memory differs from the provisioned size, so it must not overwrite the requested value.
+	@Override
+	Boolean canSyncMaxMemoryStats() {
+		return false
+	}
+
 	@Override
 	Boolean multiTenant() {
 		return false
