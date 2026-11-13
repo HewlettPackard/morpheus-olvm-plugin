@@ -2450,6 +2450,13 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 		return taskResults
 	}
 
+	// Windows has no cloud-init user creation, so Morpheus creates the group users in its finalize step
+	protected void applyCreateUsers(Map runConfig, ProvisionResponse provisionResponse) {
+		if (runConfig.platform == 'windows' && runConfig.userConfig?.createUsers) {
+			provisionResponse.createUsers = runConfig.userConfig.createUsers
+		}
+	}
+
 	protected insertVm(Map runConfig, ProvisionResponse provisionResponse, Map opts) {
 		log.debug("insertVm runConfig: {}", runConfig)
 		def taskResults = [success:false]
@@ -2457,6 +2464,7 @@ class OlvmProvisionProvider extends AbstractProvisionProvider implements VmProvi
 			ComputeServer server = runConfig.server
 			Account account = server.account
 			opts.createUserList = runConfig.userConfig.createUsers
+			applyCreateUsers(runConfig, provisionResponse)
 
 			//save server
 			runConfig.server = saveAndGet(server)
